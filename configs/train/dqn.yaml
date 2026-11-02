@@ -1,0 +1,20 @@
+algo: dqn
+scenario: default
+env_overrides: {outages: {level: random}}
+train_years: [2020, 2021, 2022]
+val_years: [2023]
+total_timesteps: 2000000
+n_envs: 1
+eval_freq: 50000
+n_eval_episodes: 20
+hyperparameters:
+  learning_rate: 0.0001
+  buffer_size: 200000
+  learning_starts: 10000
+  batch_size: 128
+  gamma: 0.995
+  train_freq: 4
+  target_update_interval: 5000
+  exploration_fraction: 0.3
+  exploration_final_eps: 0.02
+  net_arch: [128, 128]

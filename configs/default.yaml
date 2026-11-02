@@ -1,0 +1,155 @@
+# Default simulator configuration (Karachi home with rooftop solar + LFP battery).
+#
+# Every number here is an ASSUMPTION. Sources and units are listed in docs/ASSUMPTIONS.md.
+# Scenario presets (small_home.yaml, shop.yaml, ...) are merged on top of this file, so
+# they only need to list what they change. Load with:  solar_rl.load_config("shop")
+
+site:
+  name: Karachi
+  latitude: 24.86
+  longitude: 67.01
+  timezone: Asia/Karachi          # all timestamps are local time, hour-beginning labels
+
+data:
+  dir: data                       # data/karachi_<year>.csv from scripts/download_weather.py
+  years: [2020, 2021, 2022]
+  allow_synthetic: true           # synthetic weather when a year's CSV is missing
+
+episode:
+  hours: 168                      # one week of 1-hour steps
+  initial_soc_range: [0.2, 0.9]   # random start SoC during training
+  forecast_hours: 6
+  solar_forecast_noise: 0.15      # relative std, grows with lead time
+  temp_forecast_noise_c: 1.5      # std at the longest lead time
+
+rng:
+  streams: independent            # independent: one seeded RNG per component | shared: legacy single RNG
+
+pv:
+  model: pvlib                    # pvlib | simple (original model)
+  kwp: 5.0
+  temp_coeff: -0.004              # 1/C, PVWatts gamma_pdc
+  # --- simple model only ---
+  noct: 45.0
+  soiling: 0.05
+  system_derate: 0.90
+  # --- pvlib model only ---
+  tilt: 20.0
+  azimuth: 180.0                  # 180 = facing south
+  albedo: 0.20
+  transposition: haydavies        # isotropic | haydavies | perez
+  iam_b0: 0.05                    # ASHRAE incidence-angle modifier; null disables
+  faiman_u0: 25.0                 # W/m2/K
+  faiman_u1: 6.84                 # W/m2/K per m/s
+  dc_losses: 0.0681               # mismatch 2%, wiring 2%, connections 0.5%, LID 1.5%, nameplate 1% (PVWatts)
+  inverter_ac_kw: null            # null = inverter.rated_kw
+  inverter_eff: 0.96              # PVWatts nominal inverter efficiency
+  inverter_eff_ref: 0.9637        # PVWatts reference efficiency
+  soiling_model: kimber           # kimber | constant | none
+  soiling_rate_per_day: 0.008     # fraction lost per day of dust build-up
+  soiling_max: 0.30
+  rain_clean_mm: 6.0              # daily rain that washes the panels
+  rain_grace_days: 14             # days after rain with no build-up (damp ground)
+  cleaning_interval_days: 14      # manual washing; null = never
+
+inverter:
+  rated_kw: 6.0                   # hybrid inverter AC rating
+  backup_max_kw: 6.0              # max output to loads during an outage
+  transfer_time_ms: 10.0          # grid -> battery switchover
+  standby_w: 20.0                 # self-consumption, every hour
+
+battery:
+  model: lfp                      # lfp | simple (original model)
+  capacity_kwh: 10.0
+  initial_soh: 1.0
+  # --- simple model only ---
+  soc_min: 0.10
+  soc_max: 0.95
+  max_kw: 3.0
+  eta_charge: 0.95
+  eta_discharge: 0.95
+  # --- lfp model only ---
+  soc_min_grid: 0.10              # lowest SoC while the grid is on
+  soc_cutoff_backup: 0.05         # lowest SoC during an outage
+  soc_max_lfp: 1.00
+  max_charge_c: 0.5               # recommended continuous C-rate
+  max_discharge_c: 0.5
+  charge_taper_soc: 0.90          # charge power falls linearly above this SoC ...
+  charge_taper_end_c: 0.05        # ... to this C-rate at full
+  discharge_taper_soc: 0.15       # discharge power falls linearly below this SoC ...
+  discharge_taper_end_c: 0.10     # ... to this C-rate at the cutoff
+  loss_const: 0.002               # one-way loss = const*P_r + lin*P + quad*P^2/P_r while active
+  loss_lin: 0.03
+  loss_quad: 0.03
+  cycle_life: 6000                # cycles to end of life ...
+  cycle_life_dod: 0.95            # ... at this depth of discharge
+  dod_exponent: 1.0               # damage per cycle ~ DoD^k
+  eol_soh: 0.70
+  calendar_fade_per_year: 0.02    # SoH lost per year at calendar_ref_temp_c
+  calendar_ref_temp_c: 25.0
+  calendar_q10: 1.35              # calendar fade multiplier per +10 C
+  replacement_cost_rs_per_kwh: 39900.0
+
+demand:
+  model: appliances               # appliances | measured
+  profile: household              # configs/demand/<profile>.yaml
+  noise: 0.15                     # lognormal sigma on hourly demand
+  measured_log: null              # CSV (timestamp, load_kw) for model: measured
+  measured_priority: essential
+  weekend_days: [6]               # Sunday (Monday = 0)
+  ramadan_dates:                  # Pakistan, first and last fast (verify against the Ruet-e-Hilal announcement)
+    2020: [2020-04-25, 2020-05-24]
+    2021: [2021-04-14, 2021-05-13]
+    2022: [2022-04-03, 2022-05-02]
+    2023: [2023-03-24, 2023-04-21]
+    2024: [2024-03-12, 2024-04-09]
+    2025: [2025-03-02, 2025-03-30]
+
+outages:
+  level: random                   # light | medium | heavy | random
+  model: semi_markov              # markov (original) | semi_markov | replay
+  intensity: 1.0                  # multiplier on unscheduled start probabilities
+  schedule:
+    source: synthetic             # synthetic | csv | none
+    csv_path: null
+    category_by_level: {light: null, medium: null, heavy: null}
+    blocks_per_day: {light: 0, medium: 2, heavy: 3}
+    block_hours: {light: 0, medium: 2, heavy: 3}
+  markov:
+    start_prob: {light: 0.01, medium: 0.03, heavy: 0.06}
+    end_prob: 0.40
+    heat_threshold_c: 32.0
+    heat_factor_per_c: 0.15
+    evening_hours: [18, 19, 20, 21, 22, 23]
+    evening_factor: 1.5
+  semi_markov:
+    start_prob: {light: 0.01, medium: 0.03, heavy: 0.06}
+    hour_factor: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
+    month_factor: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    heat_threshold_c: 32.0
+    heat_factor_per_c: 0.15
+    duration:
+      distribution: lognormal     # lognormal | weibull | gamma | exponential
+      params: {s: 0.6, scale: 2.0}  # scipy.stats parameters (hours); mean ~2.4 h
+      max_hours: 12
+  replay:
+    csv_path: null                # CSV with timestamp, grid_on (0/1)
+    off_threshold: 0.5            # hour counts as off if the grid was off this fraction of it
+
+tariff: residential_placeholder   # configs/tariffs/<name>.yaml
+
+reward:
+  penalty_unserved_essential: 200.0   # Rs/kWh
+  penalty_unserved_other: 30.0        # Rs/kWh
+  penalty_unmet_cooling: 0.0          # Rs/kWh (only used with the rule-based AC model)
+  penalty_comfort_degree_hour: 10.0   # Rs per C-hour above the comfort temperature
+  penalty_flex_missed: 60.0           # Rs/kWh
+  wear: degradation                   # degradation | flat
+  flat_wear_rs_per_kwh: 7.0
+  include_calendar_wear: true
+  scale: 0.01
+
+rl:
+  action_space: reserve               # reserve | legacy
+  observation: extended               # extended | legacy
+  reserve_levels: [0.10, 0.30, 0.50, 0.70]

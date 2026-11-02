@@ -1,0 +1,3 @@
+# Small retail shop (configs/demand/shop.yaml) on a commercial tariff (placeholder).
+demand: {profile: shop}
+tariff: commercial_placeholder

@@ -1,17 +1,24 @@
-"""Rule-based baselines. Each policy has act(env, obs) -> action.
+"""Rule-based baselines. Each policy has act(env, obs) -> Dispatch (or an action index).
 
-They read the environment's true current state (hour, SoC, grid status),
-which is the same information a real inverter has. None of them see the future.
+They read the simulator's current state (hour, SoC, grid status, published schedule), the same
+information a real inverter has. None of them see the future, except the oracle
+(solar_rl/oracle.py), which is an upper bound.
 """
 import numpy as np
 
-from .env import DISCHARGE, GRID_CHARGE, HOLD, SOLAR_CHARGE, encode_action
+from .sim import LEGACY_MODES, Dispatch
 
 
 def naive_flex(env):
     """What most households do: run the motor/washing in the morning from 8:00."""
-    h = env.hours[env.t]
-    return int(env.flex_remaining > 1e-6 and h >= 8)
+    s = env.sim
+    return bool(s.flex_remaining > 1e-6 and s.hours[s.t] >= 8)
+
+
+def peak_hours(env):
+    s = env.sim
+    rates = env.tariff.rates[s.months[s.t] - 1]
+    return set(np.where(rates > rates.min())[0].tolist())
 
 
 class RandomPolicy:
@@ -21,7 +28,8 @@ class RandomPolicy:
         self.rng = np.random.default_rng(seed)
 
     def act(self, env, obs):
-        return int(self.rng.integers(0, 8))
+        a = int(self.rng.integers(0, 8))
+        return Dispatch(battery=LEGACY_MODES[a // 2], run_flex=bool(a % 2))
 
 
 class SolarFirst:
@@ -29,15 +37,26 @@ class SolarFirst:
     name = "solar_first"
 
     def act(self, env, obs):
-        return encode_action(SOLAR_CHARGE, naive_flex(env))
+        return Dispatch(battery="solar_charge", run_flex=naive_flex(env))
 
 
 class BatteryFirst:
-    """Solar -> load, then battery, then grid (SBU mode). Saves grid units, risks empty battery."""
+    """Solar -> load, then battery, then grid (SBU mode). Saves grid units, risks an empty battery."""
     name = "battery_first"
 
     def act(self, env, obs):
-        return encode_action(DISCHARGE, naive_flex(env))
+        return Dispatch(battery="discharge", run_flex=naive_flex(env))
+
+
+class BatteryFirstReserve:
+    """battery_first, but never discharges below a fixed reserve (charging from the grid if below it)."""
+
+    def __init__(self, reserve=0.3):
+        self.reserve = reserve
+        self.name = f"battery_first_r{int(round(reserve * 100))}"
+
+    def act(self, env, obs):
+        return Dispatch(battery="reserve", reserve=self.reserve, run_flex=naive_flex(env))
 
 
 class GridFirst:
@@ -45,8 +64,9 @@ class GridFirst:
     name = "grid_first"
 
     def act(self, env, obs):
-        mode = GRID_CHARGE if env.batt.soc < env.cfg.soc_max - 0.02 else HOLD
-        return encode_action(mode, naive_flex(env))
+        b = env.sim.batt
+        mode = "grid_charge" if b.soc < b.soc_max - 0.02 else "hold"
+        return Dispatch(battery=mode, run_flex=naive_flex(env))
 
 
 class HandTunedRule:
@@ -61,25 +81,46 @@ class HandTunedRule:
         self.risky_hours = set(risky_hours)
 
     def act(self, env, obs):
-        c = env.cfg
-        h = env.hours[env.t]
-        soc = env.batt.soc
-        heavy = env.level == "heavy"
+        s = env.sim
+        h = int(s.hours[s.t])
+        soc = s.batt.soc
+        peak = peak_hours(env)
+        heavy = s.level == "heavy"
         reserve = self.reserve_risky if (h in self.risky_hours or heavy) else self.reserve_normal
-        sched_soon = env.outages.hours_to_next_scheduled(h) <= 3
+        sched_soon = s.outages.hours_to_next_scheduled(h) <= 3
 
-        if soc < reserve and (sched_soon or h in self.risky_hours) and h not in c.peak_hours:
-            mode = GRID_CHARGE
-        elif soc > reserve and h in c.peak_hours:
-            mode = DISCHARGE
+        if soc < reserve and (sched_soon or h in self.risky_hours) and h not in peak:
+            mode = "grid_charge"
+        elif soc > reserve and h in peak:
+            mode = "discharge"
         else:
-            mode = SOLAR_CHARGE
+            mode = "solar_charge"
 
-        solar_now = env.pv[env.t]
-        hours_left = c.flex_deadline_hour - h
-        need_hours = int(np.ceil(env.flex_remaining / c.flex_max_kw)) if env.flex_remaining > 1e-6 else 0
-        run = int(need_hours > 0 and (solar_now >= 1.5 or hours_left <= need_hours))
-        return encode_action(mode, run)
+        fc = s.demand.flex_cfg(s.t)
+        solar_now = s.pv[s.t]
+        hours_left = fc.deadline_hour - h
+        need_hours = int(np.ceil(s.flex_remaining / fc.max_kw)) if s.flex_remaining > 1e-6 else 0
+        strong_sun = solar_now >= 0.3 * env.cfg.pv.kwp
+        run = need_hours > 0 and (strong_sun or hours_left <= need_hours)
+        return Dispatch(battery=mode, run_flex=bool(run))
 
 
+RESERVE_SWEEP = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70]
 ALL_BASELINES = {p.name: p for p in [RandomPolicy, SolarFirst, BatteryFirst, GridFirst, HandTunedRule]}
+
+
+def make_baseline(name):
+    """Baseline by name: one of ALL_BASELINES, battery_first_r<NN>, or oracle."""
+    if name in ALL_BASELINES:
+        return ALL_BASELINES[name]()
+    if name.startswith("battery_first_r"):
+        return BatteryFirstReserve(int(name.rsplit("r", 1)[1]) / 100.0)
+    if name == "oracle":
+        from .oracle import OraclePolicy
+        return OraclePolicy()
+    raise KeyError(f"unknown baseline {name}")
+
+
+def default_baselines(include_oracle=True):
+    names = list(ALL_BASELINES) + [f"battery_first_r{int(r * 100)}" for r in RESERVE_SWEEP]
+    return names + (["oracle"] if include_oracle else [])

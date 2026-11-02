@@ -1,0 +1,19 @@
+# The ORIGINAL demand model, written as an appliance profile so it reproduces the old
+# simulator exactly (used by configs/legacy_v1.yaml and the golden test). Do not edit.
+name: household_v1
+appliances:
+  - {name: fridge, kw: 0.10, priority: essential, hours: all}
+  - {name: internet, kw: 0.03, priority: essential, hours: all}
+  - {name: lights_evening, kw: 0.30, priority: essential, hours: [18, 19, 20, 21, 22, 23, 0]}
+  - {name: lights_day, kw: 0.10, priority: essential, hours: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]}
+  - {name: lights_night, kw: 0.05, priority: essential, hours: [1, 2, 3, 4, 5]}
+  - {name: fans, kw: 0.40, priority: essential, hours: all, temp_scale: [24.0, 32.0],
+     hour_factor: {3: 0.7, 4: 0.7, 5: 0.7, 6: 0.7}}
+cooling:
+  model: rule
+  kw: 1.5
+  hours: [13, 14, 15, 16, 17, 21, 22, 23, 0, 1, 2, 3]
+  temp_low_c: 29.0
+  temp_high_c: 34.0
+flexible: {daily_kwh: 1.5, max_kw: 1.0, deadline_hour: 22}
+variants: {}

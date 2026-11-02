@@ -1,0 +1,13 @@
+# Larger home: 10 kWp, 20 kWh battery, 10 kW inverter, two air-conditioned rooms
+# (modelled as one lumped zone twice the size: same temperatures, double the energy).
+pv: {kwp: 10.0}
+battery: {capacity_kwh: 20.0}
+inverter: {rated_kw: 10.0, backup_max_kw: 10.0}
+demand:
+  profile_overrides:
+    cooling: {r_c_per_kw: 3.0, c_kwh_per_c: 2.0, solar_aperture_m2: 1.0, internal_gain_kw: 0.40, ac_cooling_kw: 10.6}
+    appliances:
+      - {name: fridge, kw: 0.20}
+      - {name: lights_evening, kw: 0.50}
+      - {name: fans, kw: 0.60}
+    flexible: {daily_kwh: 3.0, max_kw: 1.5}

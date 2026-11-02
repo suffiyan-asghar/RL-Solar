@@ -1,4 +1,6 @@
-from .config import SimConfig
-from .env import SolarHomeEnv, MODES, decode_action, encode_action
+from .config import SimConfig, load_config
+from .env import MODES, SolarHomeEnv, decode_action, encode_action
+from .sim import Dispatch, Simulator
 
-__all__ = ["SimConfig", "SolarHomeEnv", "MODES", "decode_action", "encode_action"]
+__all__ = ["SimConfig", "load_config", "SolarHomeEnv", "Simulator", "Dispatch", "MODES",
+           "decode_action", "encode_action"]

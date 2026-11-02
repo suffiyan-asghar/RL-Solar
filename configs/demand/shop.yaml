@@ -1,0 +1,38 @@
+# Small Karachi retail shop (grocery / general store), open roughly 10:00-23:00.
+# All values are ASSUMPTIONS (docs/ASSUMPTIONS.md).
+name: shop
+appliances:
+  - {name: chiller_fridges, kw: 0.45, priority: essential, hours: all}
+  - {name: cctv_router, kw: 0.05, priority: essential, hours: all}
+  - {name: lights, kw: 0.60, priority: essential, hours: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}
+  - {name: signboard, kw: 0.15, priority: other, hours: [18, 19, 20, 21, 22]}
+  - {name: fans, kw: 0.30, priority: essential, hours: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22], temp_scale: [24.0, 32.0]}
+  - {name: pos_till, kw: 0.06, priority: essential, hours: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}
+  - {name: microwave, kw: 0.20, priority: other, hours: [12, 13, 19, 20], probability: 0.4}
+cooling:
+  model: thermal
+  r_c_per_kw: 3.5              # larger, leakier space (open door)
+  c_kwh_per_c: 1.5
+  solar_aperture_m2: 1.0
+  internal_gain_kw: 0.60       # customers, lights, fridge heat
+  ac_cooling_kw: 7.0           # 2-ton AC
+  ac_cop: 3.2
+  occupied_hours: [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  setpoint_c: 26.0
+  precool_setpoint_c: 23.0
+  initial_temp_c: 28.0
+flexible: {daily_kwh: 1.0, max_kw: 1.0, deadline_hour: 22}   # water pump, stock-room freezer defrost
+variants:
+  weekend:                      # Sunday: shorter hours
+    appliances:
+      - {name: lights, hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}
+      - {name: pos_till, hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}
+      - {name: fans, hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}
+    cooling: {occupied_hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]}
+  ramadan:                      # opens after midday, busy from iftar until late
+    appliances:
+      - {name: lights, hours: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]}
+      - {name: pos_till, hours: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]}
+      - {name: fans, hours: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]}
+      - {name: signboard, hours: [18, 19, 20, 21, 22, 23, 0, 1]}
+    cooling: {occupied_hours: [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1]}

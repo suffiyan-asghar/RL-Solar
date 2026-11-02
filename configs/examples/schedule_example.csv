@@ -1,0 +1,7 @@
+feeder_category,start,end
+low_loss,,
+medium_loss,07:00,09:00
+medium_loss,19:00,21:00
+high_loss,04:00,07:00
+high_loss,12:00,15:00
+high_loss,20:00,23:00

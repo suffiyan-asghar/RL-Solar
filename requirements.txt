@@ -3,7 +3,11 @@ stable-baselines3>=2.3
 torch
 numpy
 pandas
+scipy
 matplotlib
 pvlib>=0.10
+pyyaml
+tabulate
 tensorboard
 pytest
+streamlit>=1.30

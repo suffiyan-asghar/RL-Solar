@@ -1,0 +1,18 @@
+algo: ppo
+scenario: default               # configs/<scenario>.yaml
+env_overrides: {outages: {level: random}}
+train_years: [2020, 2021, 2022]
+val_years: [2023]
+total_timesteps: 2000000
+n_envs: 8
+eval_freq: 50000                # environment steps between validation runs
+n_eval_episodes: 20
+hyperparameters:
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 256
+  n_epochs: 10
+  gamma: 0.995
+  gae_lambda: 0.95
+  ent_coef: 0.01
+  net_arch: [128, 128]

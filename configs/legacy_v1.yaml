@@ -1,0 +1,17 @@
+# Reproduces the ORIGINAL simulator (commit a1cc63d) exactly: simple PV, simple battery
+# with flat wear cost, rule-based AC, Markov outages, one shared RNG, 8 legacy actions and
+# the 30-value observation. Used by tests/test_golden.py. Do not edit.
+rng: {streams: shared}
+pv: {model: simple}
+battery: {model: simple}
+inverter: {rated_kw: 6.0, backup_max_kw: null, transfer_time_ms: 0.0, standby_w: 0.0}
+demand: {profile: household_v1, ramadan_dates: {}}
+outages: {model: markov}
+tariff: legacy_v1
+reward:
+  penalty_unserved_other: 0.0
+  penalty_unmet_cooling: 30.0
+  penalty_comfort_degree_hour: 0.0
+  wear: flat
+  include_calendar_wear: false
+rl: {action_space: legacy, observation: legacy}

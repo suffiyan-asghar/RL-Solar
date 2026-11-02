@@ -1,31 +1,45 @@
-"""Gymnasium environment: hourly control of rooftop solar + battery under load-shedding.
+"""Gymnasium wrapper around the simulator: observation, action mapping and reward only.
 
-Actions (Discrete 8) = battery mode (4) x flexible load (2)
-    battery mode: 0 grid_charge  - surplus solar AND grid charge the battery
-                  1 solar_charge - surplus solar charges battery, grid covers deficit
-                  2 hold         - battery idle, surplus exported, grid covers deficit
-                  3 discharge    - battery covers deficit first, surplus charges battery
-    flexible:     0 delay, 1 run (up to flex_max_kw this hour)
+Action spaces (rl.action_space)
+    legacy   Discrete(8) = battery mode {grid_charge, solar_charge, hold, discharge} x flexible {delay, run}
+    reserve  Discrete(R x 2 x 2) = target battery reserve {10, 30, 50, 70 %} x flexible {delay, run}
+             x AC {normal setpoint, pre-cool}. The dispatch controller (Dispatch battery="reserve")
+             discharges above the reserve, charges from solar first and from the grid only while
+             SoC is below the reserve.
 
-During an outage the inverter islands automatically: solar + battery serve
-essential -> cooling -> flexible load, whatever the chosen mode. Grid charging
-during an outage is impossible and is logged as an override.
+Observation (rl.observation)
+    legacy    30 values: hour and day-of-year (sin/cos), SoC, solar now, demand now, AC demand,
+              flexible energy left, hours to deadline, grid on/off, hours since last outage,
+              outage level, price, hours to next scheduled outage, scheduled now, temperature,
+              episode progress, noisy 6-hour forecasts of solar and temperature
+    extended  legacy + room temperature, occupied now, hours into the current outage,
+              weekend, Ramadan, state of health (36 values)
+    The agent is never told when unscheduled outages will happen.
 
-Reward (Rs, scaled by cfg.reward_scale):
+Reward (Rs x reward.scale)
     -(import cost - export credit) - battery wear
-    - lambda1 * unserved essential kWh - lambda3 * unmet cooling kWh
-    - flex penalty * flexible kWh not done by the deadline
+    - penalty_unserved_essential x kWh - penalty_unserved_other x kWh - penalty_unmet_cooling x kWh
+    - penalty_comfort_degree_hour x degree-hours - penalty_flex_missed x kWh
+    Battery wear comes from the degradation model (cycle + calendar damage x replacement cost),
+    or a flat Rs/kWh discharged (reward.wear: flat). Fixed monthly charges are reported in the
+    episode stats but left out of the reward because no action changes them.
 """
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .components import Battery, OutageModel, cooling_kw, essential_kw, pv_power_kw
-from .config import LEVELS, SimConfig
-from .weather import load_years
+from .config import LEVELS, SimConfig, load_config
+from .sim import LEGACY_MODES, Dispatch, Simulator
+from .tariff import Tariff
 
-MODES = ["grid_charge", "solar_charge", "hold", "discharge"]
+MODES = LEGACY_MODES
 GRID_CHARGE, SOLAR_CHARGE, HOLD, DISCHARGE = range(4)
+LEVEL_CODE = {"light": 0.0, "medium": 0.5, "heavy": 1.0, "replay": 0.5}
+STAT_KEYS = ["cost", "import_kwh", "export_kwh", "import_cost", "export_credit", "wear_cost", "wear_cycle_cost",
+             "wear_calendar_cost", "fixed_charges", "solar_kwh", "curtailed_kwh", "batt_discharge_kwh",
+             "batt_charge_kwh", "battery_losses_kwh", "standby_kwh", "unserved_essential_kwh", "unserved_hours",
+             "unserved_other_kwh", "unmet_cooling_kwh", "comfort_degree_hours", "ac_kwh", "flex_missed_kwh",
+             "outage_hours", "transfer_events", "overrides", "reward"]
 
 
 def decode_action(a):
@@ -39,196 +53,182 @@ def encode_action(mode, run_flex):
 class SolarHomeEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, cfg: SimConfig = None, weather=None):
+    def __init__(self, cfg=None, weather=None, sim=None):
         super().__init__()
-        self.cfg = cfg or SimConfig()
-        c = self.cfg
-        self.weather = weather if weather is not None else load_years(c.years, c)
-        self.ghi = self.weather["ghi"].to_numpy()
-        self.temp = self.weather["temp_c"].to_numpy()
-        self.pv = pv_power_kw(self.ghi, self.temp, c)
-        idx = self.weather.index
-        self.hours = idx.hour.to_numpy()
-        self.doy = idx.dayofyear.to_numpy()
-        last = len(self.pv) - c.episode_hours - c.forecast_hours - 1
-        self.valid_starts = np.where(self.hours[:last] == 0)[0]
-        if len(self.valid_starts) == 0:
-            raise ValueError("Not enough weather data for one episode.")
-
-        self.action_space = spaces.Discrete(8)
-        self.obs_dim = 18 + 2 * c.forecast_hours
+        if cfg is None or isinstance(cfg, str):
+            cfg = load_config(cfg or "default")
+        self.cfg: SimConfig = cfg
+        self.sim = sim if sim is not None else Simulator(cfg, weather)
+        self.weather = self.sim.weather
+        self.tariff = Tariff(cfg.tariff)
+        rl = cfg.rl
+        self.reserves = list(rl.reserve_levels)
+        n_actions = 8 if rl.action_space == "legacy" else len(self.reserves) * 4
+        self.action_space = spaces.Discrete(n_actions)
+        H = cfg.episode.forecast_hours
+        self.obs_dim = 18 + 2 * H + (6 if rl.observation == "extended" else 0)
         self.observation_space = spaces.Box(-5.0, 5.0, shape=(self.obs_dim,), dtype=np.float32)
+        wc = cfg.battery
+        self.replacement_cost = wc.replacement_cost_rs_per_kwh * wc.capacity_kwh
 
-    # ------------------------------------------------------------ helpers
-    def _price(self, hour):
-        return self.cfg.import_peak if hour in self.cfg.peak_hours else self.cfg.import_offpeak
+    # ------------------------------------------------------------ convenience views
+    @property
+    def valid_starts(self):
+        return self.sim.valid_starts
 
-    def _sample_demand(self):
-        """Draw this hour's demand (with noise) for the current time index."""
-        c, t = self.cfg, self.t
-        h, T = self.hours[t], self.temp[t]
-        n1, n2 = self.np_random.lognormal(0, c.load_noise, 2)
-        self.cur_essential = essential_kw(h, T) * n1
-        self.cur_cooling = cooling_kw(h, T, c) * n2
+    @property
+    def level(self):
+        return self.sim.level
 
+    @property
+    def t(self):
+        return self.sim.t
+
+    @property
+    def hours(self):
+        return self.sim.hours
+
+    @property
+    def pv(self):
+        return self.sim.pv
+
+    def action_to_dispatch(self, action):
+        a = int(action)
+        if self.cfg.rl.action_space == "legacy":
+            mode, run_flex = decode_action(a)
+            return Dispatch(battery=MODES[mode], run_flex=bool(run_flex))
+        ac = a % 2
+        run_flex = (a // 2) % 2
+        r = a // 4
+        return Dispatch(battery="reserve", reserve=self.reserves[r], run_flex=bool(run_flex),
+                        ac="precool" if ac else "normal")
+
+    def dispatch_to_action(self, d):
+        """Nearest action for a Dispatch (used to show baselines in the agent's action terms)."""
+        if self.cfg.rl.action_space == "legacy":
+            return encode_action(MODES.index(d.battery) if d.battery in MODES else SOLAR_CHARGE, d.run_flex)
+        r = int(np.argmin([abs(x - d.reserve) for x in self.reserves]))
+        return (r * 2 + int(d.run_flex)) * 2 + int(d.ac == "precool")
+
+    # ------------------------------------------------------------ observation
     def _observe(self):
-        c, t = self.cfg, self.t
-        h = self.hours[t]
-        d = self.doy[t]
-        hours_to_deadline = max(c.flex_deadline_hour - h, 0)
+        c, s = self.cfg, self.sim
+        t = s.t
+        h = s.hours[t]
+        d = s.doy[t]
+        fc = s.demand.flex_cfg(t)
+        cc = s.cooling_cfg(t)
+        ac_norm = (cc.kw if cc.model == "rule" else cc.ac_max_kw_elec) if cc is not None else 1.0
+        hours_to_deadline = max(fc.deadline_hour - h, 0)
         obs = [
             np.sin(2 * np.pi * h / 24), np.cos(2 * np.pi * h / 24),
             np.sin(2 * np.pi * d / 365), np.cos(2 * np.pi * d / 365),
-            self.batt.soc,
-            self.pv[t] / c.pv_kwp,
-            self.cur_essential / 1.0,
-            self.cur_cooling / max(c.ac_kw, 1e-6),
-            self.flex_remaining / max(c.flex_daily_kwh, 1e-6),
+            s.batt.soc,
+            s.pv[t] / c.pv.kwp,
+            (s.cur_essential + s.cur_other) / 1.0,
+            s.ac_demand_kw("normal") / max(ac_norm, 1e-6),
+            s.flex_remaining / max(fc.daily_kwh, 1e-6),
             hours_to_deadline / 24.0,
-            float(self.grid_on),
-            min(self.hours_since_outage, 24) / 24.0,
-            LEVELS.index(self.level) / 2.0,
-            self._price(h) / 60.0,
-            self.outages.hours_to_next_scheduled(h) / 12.0,
-            float(self.outages.scheduled(h)),
-            (self.temp[t] - 25.0) / 10.0,
-            self.t_in_episode / c.episode_hours,
+            float(s.grid_on),
+            min(s.hours_since_outage, 24) / 24.0,
+            LEVEL_CODE.get(str(s.level), 0.5),
+            self.tariff.import_rate(s.months[t], h) / 60.0,
+            s.outages.hours_to_next_scheduled(h) / 12.0,
+            float(s.outages.scheduled(h)),
+            (s.temp[t] - 25.0) / 10.0,
+            s.t_in_episode / c.episode.hours,
         ]
-        # noisy forecasts: error grows with lead time
-        for k in range(1, c.forecast_hours + 1):
-            sigma = c.forecast_noise * (0.5 + k / c.forecast_hours)
-            obs.append(self.pv[t + k] / c.pv_kwp * max(0.0, 1 + self.np_random.normal(0, sigma)))
-        for k in range(1, c.forecast_hours + 1):
-            obs.append((self.temp[t + k] + self.np_random.normal(0, 1.5 * k / c.forecast_hours) - 25.0) / 10.0)
+        H = c.episode.forecast_hours
+        rng = s.rngs["forecast"]
+        for k in range(1, H + 1):
+            sigma = c.episode.solar_forecast_noise * (0.5 + k / H)
+            obs.append(s.pv[t + k] / c.pv.kwp * max(0.0, 1 + rng.normal(0, sigma)))
+        for k in range(1, H + 1):
+            obs.append((s.temp[t + k] + rng.normal(0, c.episode.temp_forecast_noise_c * k / H) - 25.0) / 10.0)
+        if c.rl.observation == "extended":
+            room = s.room.temp if s.room is not None else 25.0
+            obs += [(room - 25.0) / 10.0, float(s.occupied()), min(s.hours_in_outage, 12) / 12.0,
+                    float(s.weekend[t]), float(s.ramadan[t]), (s.batt.soh - 0.7) / 0.3]
         return np.clip(np.array(obs, dtype=np.float32), -5, 5)
-
-    def _advance_grid(self):
-        self.grid_on = self.outages.step(self.hours[self.t], self.temp[self.t])
-        self.hours_since_outage = 0 if not self.grid_on else self.hours_since_outage + 1
 
     # ------------------------------------------------------------ gym API
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        c = self.cfg
         options = options or {}
-        self.start = int(options.get("start_index", self.np_random.choice(self.valid_starts)))
-        self.t = self.start
-        self.t_in_episode = 0
-        lvl = options.get("level", c.outage_level)
-        self.level = self.np_random.choice(LEVELS) if lvl == "random" else lvl
-        self.batt = Battery(c, options.get("soc", self.np_random.uniform(0.2, 0.9)))
-        self.outages = OutageModel(c, self.level, self.np_random)
-        self.flex_remaining = c.flex_daily_kwh
-        self.hours_since_outage = 24
-        self._advance_grid()
-        self._sample_demand()
-        self.stats = {k: 0.0 for k in [
-            "cost", "import_kwh", "export_kwh", "import_cost", "export_credit", "wear_cost",
-            "solar_kwh", "curtailed_kwh", "batt_discharge_kwh", "batt_charge_kwh",
-            "unserved_essential_kwh", "unserved_hours", "unmet_cooling_kwh", "flex_missed_kwh",
-            "outage_hours", "overrides", "reward"]}
-        return self._observe(), {"level": self.level, "start_time": str(self.weather.index[self.t])}
+        if self.cfg.rng.streams == "shared":
+            self.sim.reset(shared_rng=self.np_random, start_index=options.get("start_index"),
+                           level=options.get("level"), soc=options.get("soc"))
+        else:
+            sim_seed = int(self.np_random.integers(0, 2 ** 63 - 1))
+            self.sim.reset(seed=sim_seed, start_index=options.get("start_index"),
+                           level=options.get("level"), soc=options.get("soc"))
+        self.stats = {k: 0.0 for k in STAT_KEYS}
+        return self._observe(), {"level": self.sim.level, "start_time": str(self.weather.index[self.sim.t])}
 
     def step(self, action):
-        c, t = self.cfg, self.t
-        mode, run_flex = decode_action(action)
-        h = self.hours[t]
-        S, E, C = self.pv[t], self.cur_essential, self.cur_cooling
-        F_req = min(self.flex_remaining, c.flex_max_kw) if run_flex else 0.0
-        b = self.batt
-        b_in_budget = c.batt_max_kw          # per-hour power limits shared across uses
-        b_out_budget = c.batt_max_kw
+        return self.step_dispatch(self.action_to_dispatch(action))
 
-        imp = exp = curtailed = charged = discharged = 0.0
-        unserved_E = unmet_C = 0.0
-        flex_done = 0.0
-        override = False
-
-        if self.grid_on:
-            load = E + C + F_req
-            net = S - load
-            if net >= 0:
-                if mode != HOLD:
-                    charged = b.charge(min(net, b_in_budget))
-                exp = net - charged
-            else:
-                deficit = -net
-                if mode == DISCHARGE:
-                    discharged = b.discharge(min(deficit, b_out_budget))
-                    deficit -= discharged
-                imp = deficit
-            if mode == GRID_CHARGE:
-                extra = b.charge(max(0.0, b_in_budget - charged))
-                charged += extra
-                imp += extra
-            flex_done = F_req
+    def step_dispatch(self, d: Dispatch):
+        c, s = self.cfg, self.sim
+        t = s.t
+        f = s.step(d)
+        rw = c.reward
+        month, h = int(s.months[t]), f["hour"]
+        import_cost, export_credit, fixed, price = self.tariff.hour_cost(
+            f["import_kwh"], f["export_kwh"], month, h, int(s.index[t].year))
+        if rw.wear == "flat":
+            wear = f["discharged"] * rw.flat_wear_rs_per_kwh
+            wear_cyc, wear_cal = wear, 0.0
         else:
-            if mode == GRID_CHARGE:
-                override = True
-            avail = S + min(b.max_discharge_output(), b_out_budget)
-            served_E = min(E, avail); avail -= served_E
-            served_C = min(C, avail); avail -= served_C
-            served_F = min(F_req, avail)
-            unserved_E, unmet_C, flex_done = E - served_E, C - served_C, served_F
-            served = served_E + served_C + served_F
-            if served > S:
-                discharged = b.discharge(served - S)
-            else:
-                surplus = S - served
-                charged = b.charge(min(surplus, b_in_budget))
-                curtailed = surplus - charged
-
-        self.flex_remaining -= flex_done
-        flex_missed = 0.0
-        if h == c.flex_deadline_hour:
-            flex_missed = self.flex_remaining
-            self.flex_remaining = 0.0
-
-        price = self._price(h)
-        import_cost, export_credit = imp * price, exp * c.export_rate
-        wear = discharged * c.wear_cost_per_kwh
-        penalty = (c.penalty_unserved_essential * unserved_E + c.penalty_unmet_cooling * unmet_C
-                   + c.penalty_flex_missed * flex_missed)
+            wear_cyc = f["cycle_damage"] * self.replacement_cost
+            wear_cal = f["calendar_damage"] * self.replacement_cost if rw.include_calendar_wear else 0.0
+            wear = wear_cyc + wear_cal
+        penalty = (rw.penalty_unserved_essential * f["unserved_essential"]
+                   + rw.penalty_unserved_other * f["unserved_other"]
+                   + rw.penalty_unmet_cooling * f["unmet_cooling"]
+                   + rw.penalty_flex_missed * f["flex_missed"]
+                   + rw.penalty_comfort_degree_hour * f["comfort_degree_hours"])
         rupees = -(import_cost - export_credit) - wear - penalty
-        reward = rupees * c.reward_scale
+        reward = rupees * rw.scale
 
-        info = dict(time=str(self.weather.index[t]), hour=int(h), mode=MODES[mode], run_flex=run_flex,
-                    grid_on=bool(self.grid_on), solar=S, essential=E, cooling=C, flex=flex_done,
-                    import_kwh=imp, export_kwh=exp, charged=charged, discharged=discharged,
-                    curtailed=curtailed, unserved_essential=unserved_E, unmet_cooling=unmet_C,
-                    flex_missed=flex_missed, soc=b.soc, price=price, override=override,
-                    level=self.level)
+        info = dict(f)
+        info["time"] = str(f["time"])
+        info["mode"] = f["mode"]
+        info.update(price=price, import_cost=import_cost, export_credit=export_credit, wear_cost=wear,
+                    fixed_charge=fixed, penalty=penalty, reward=reward)
 
-        s = self.stats
-        s["import_kwh"] += imp; s["export_kwh"] += exp
-        s["import_cost"] += import_cost; s["export_credit"] += export_credit
-        s["cost"] += import_cost - export_credit; s["wear_cost"] += wear
-        s["solar_kwh"] += S; s["curtailed_kwh"] += curtailed
-        s["batt_discharge_kwh"] += discharged; s["batt_charge_kwh"] += charged
-        s["unserved_essential_kwh"] += unserved_E; s["unserved_hours"] += float(unserved_E > 1e-6)
-        s["unmet_cooling_kwh"] += unmet_C; s["flex_missed_kwh"] += flex_missed
-        s["outage_hours"] += float(not self.grid_on); s["overrides"] += float(override)
-        s["reward"] += reward
+        st = self.stats
+        st["import_kwh"] += f["import_kwh"]; st["export_kwh"] += f["export_kwh"]
+        st["import_cost"] += import_cost; st["export_credit"] += export_credit
+        st["cost"] += import_cost - export_credit; st["wear_cost"] += wear
+        st["wear_cycle_cost"] += wear_cyc; st["wear_calendar_cost"] += wear_cal
+        st["fixed_charges"] += fixed
+        st["solar_kwh"] += f["solar"]; st["curtailed_kwh"] += f["curtailed"]
+        st["batt_discharge_kwh"] += f["discharged"]; st["batt_charge_kwh"] += f["charged"]
+        st["battery_losses_kwh"] += (f["charged"] - f["charged_dc"]) + (f["discharged_dc"] - f["discharged"])
+        st["standby_kwh"] += f["standby"]
+        st["unserved_essential_kwh"] += f["unserved_essential"]
+        st["unserved_hours"] += float(f["unserved_essential"] > 1e-3)   # ignore switchover blips
+        st["unserved_other_kwh"] += f["unserved_other"]
+        st["unmet_cooling_kwh"] += f["unmet_cooling"]; st["flex_missed_kwh"] += f["flex_missed"]
+        st["comfort_degree_hours"] += f["comfort_degree_hours"]
+        st["ac_kwh"] += f["cooling"] - f["unmet_cooling"]
+        st["outage_hours"] += float(not f["grid_on"]); st["overrides"] += float(f["override"])
+        st["transfer_events"] += float(f["transfer_event"])
+        st["reward"] += reward
 
-        # advance time
-        self.t += 1
-        self.t_in_episode += 1
-        if self.hours[self.t] == 0:
-            self.flex_remaining = c.flex_daily_kwh
-        self._advance_grid()
-        self._sample_demand()
-
-        terminated = False
-        truncated = self.t_in_episode >= c.episode_hours
+        truncated = s.done
         if truncated:
             info["episode_stats"] = self.episode_stats()
-        return self._observe(), float(reward), terminated, truncated, info
+        return self._observe(), float(reward), False, truncated, info
 
     def episode_stats(self):
-        s = dict(self.stats)
-        s["battery_cycles"] = s["batt_discharge_kwh"] / self.cfg.batt_kwh
-        used = s["solar_kwh"] - s["export_kwh"] - s["curtailed_kwh"]
-        s["self_consumption"] = used / s["solar_kwh"] if s["solar_kwh"] > 0 else 0.0
-        s["total_cost_incl_wear"] = s["cost"] + s["wear_cost"]
-        s["level"] = self.level
-        return s
+        st = dict(self.stats)
+        st["battery_cycles"] = st["batt_discharge_kwh"] / self.cfg.battery.capacity_kwh
+        used = st["solar_kwh"] - st["export_kwh"] - st["curtailed_kwh"]
+        st["self_consumption"] = used / st["solar_kwh"] if st["solar_kwh"] > 0 else 0.0
+        st["total_cost_incl_wear"] = st["cost"] + st["wear_cost"]
+        st["bill_incl_fixed"] = st["cost"] + st["fixed_charges"]
+        st["soh_end"] = self.sim.batt.soh
+        st["level"] = self.sim.level
+        return st

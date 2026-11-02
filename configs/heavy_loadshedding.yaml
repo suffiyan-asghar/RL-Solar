@@ -1,0 +1,2 @@
+# Always heavy load-shedding (3 x 3 h scheduled blocks a day + frequent unscheduled outages).
+outages: {level: heavy}

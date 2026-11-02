@@ -1,0 +1,16 @@
+# PLACEHOLDER residential tariff. The rates are the project's original assumptions; fixed
+# charges and taxes are 0 because the real values have not been provided yet.
+# Replace them with the current NEPRA / K-Electric notice and set verified: true.
+name: residential_placeholder
+verified: false
+import:
+  default_rate: 42.0            # Rs/kWh, off-peak
+  periods:
+    - {name: peak, hours: [18, 19, 20, 21, 22], months: all, rate: 50.0}
+fixed_monthly_rs: 0.0           # TODO: fixed / meter rent / TV fee per month
+taxes:                          # TODO: GST, electricity duty, ... (percent)
+  - {name: gst, percent: 0.0, applies_to: [energy, fixed]}
+  - {name: electricity_duty, percent: 0.0, applies_to: [energy]}
+export:
+  scheme: net_billing           # export paid at a fixed buyback rate
+  rate: 11.0                    # Rs/kWh

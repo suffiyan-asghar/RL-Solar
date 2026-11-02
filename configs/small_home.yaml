@@ -1,0 +1,4 @@
+# Smaller system: 3 kWp, 5 kWh battery, 4 kW inverter.
+pv: {kwp: 3.0}
+battery: {capacity_kwh: 5.0}
+inverter: {rated_kw: 4.0, backup_max_kw: 4.0}

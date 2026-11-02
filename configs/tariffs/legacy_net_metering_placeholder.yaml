@@ -1,0 +1,15 @@
+# PLACEHOLDER: legacy net-metering scenario (export credited at a higher rate).
+# Same import side as residential_placeholder; export rate is the original "~26" assumption.
+name: legacy_net_metering_placeholder
+verified: false
+import:
+  default_rate: 42.0
+  periods:
+    - {name: peak, hours: [18, 19, 20, 21, 22], months: all, rate: 50.0}
+fixed_monthly_rs: 0.0
+taxes:
+  - {name: gst, percent: 0.0, applies_to: [energy, fixed]}
+  - {name: electricity_duty, percent: 0.0, applies_to: [energy]}
+export:
+  scheme: net_metering
+  rate: 26.0

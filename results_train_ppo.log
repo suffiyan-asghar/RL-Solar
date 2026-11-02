@@ -1,0 +1,35 @@
+Training PPO seed=0 for 300,000 steps (weather: nasa_power)
+Eval num_timesteps=20000, episode_reward=-8.09 +/- 4.77
+Episode length: 168.00 +/- 0.00
+New best mean reward!
+Eval num_timesteps=40000, episode_reward=-6.86 +/- 7.58
+Episode length: 168.00 +/- 0.00
+New best mean reward!
+Eval num_timesteps=60000, episode_reward=-0.80 +/- 3.92
+Episode length: 168.00 +/- 0.00
+New best mean reward!
+Eval num_timesteps=80000, episode_reward=-5.86 +/- 8.17
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=100000, episode_reward=-4.69 +/- 9.58
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=120000, episode_reward=-2.59 +/- 8.19
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=140000, episode_reward=-3.77 +/- 6.13
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=160000, episode_reward=-1.12 +/- 5.26
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=180000, episode_reward=-4.63 +/- 9.32
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=200000, episode_reward=-2.13 +/- 8.26
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=220000, episode_reward=-4.12 +/- 7.06
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=240000, episode_reward=-5.88 +/- 7.70
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=260000, episode_reward=-6.36 +/- 8.31
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=280000, episode_reward=-3.98 +/- 7.36
+Episode length: 168.00 +/- 0.00
+Eval num_timesteps=300000, episode_reward=-4.76 +/- 9.81
+Episode length: 168.00 +/- 0.00
+Saved models\ppo_seed0/best_model.zip and final_model.zip
